@@ -1,16 +1,8 @@
 
-# app_vive_le_marche.py
-# Streamlit dashboard - Vive le Marché (fatos + dimensões com labels em francês)
-# Execução (exemplo):
-#   streamlit run app_vive_le_marche.py -- --data_root "I:/Projetos_Python/clairdata-vive-le-marche/data"
-#
-# Requisitos (ambiente vlm311):
-#   conda install -y pandas pyarrow plotly fastparquet streamlit
-
+# app_vive_le_marche.py — multi-onglets (Adhoc, Tableau de bord, Tableau, Cartes, Aperçu)
 from __future__ import annotations
-import os
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 import argparse
 
 import pandas as pd
@@ -22,13 +14,11 @@ try:
 except Exception:
     PLOTLY_OK = False
 
-# ============================================
-# Config
-# ============================================
-st.set_page_config(page_title="Vive le Marché — Dashboard (FR)", layout="wide")
+st.set_page_config(page_title="Vive le Marché", layout="wide")
 
-DIM_TARGETS = ["Ano", "GS", "NA5", "NA10", "ZELT", "REGLT", "SEXE", "ANAI"]
+# ---------------- Config ----------------
 METRIC = "QTD"
+FILTER_KEYS = ["Ano", "GS", "NA5", "NA10"]
 DESC_OUT = {
     "Ano": "ano_desc_fr",
     "GS": "gs_desc_fr",
@@ -54,9 +44,7 @@ GEO_FILES = {
     "ZELT":  ["fr_zones_emploi.geojson", "zelt.geojson", "zones_emploi.geojson"],
 }
 
-# ============================================
-# Helpers
-# ============================================
+# --------------- IO helpers ---------------
 def _read_any(path: Path) -> Optional[pd.DataFrame]:
     if not path.exists():
         return None
@@ -74,7 +62,6 @@ def _read_any(path: Path) -> Optional[pd.DataFrame]:
             except Exception:
                 continue
         return None
-    # fallback: tenta parquet mesmo se extensão for estranha
     try:
         return pd.read_parquet(path, engine="pyarrow")
     except Exception:
@@ -100,7 +87,6 @@ def detect_key_col(df: pd.DataFrame, key: str) -> Optional[str]:
     for k in (key.lower(), f"cod_{key.lower()}", "codigo", "code", "id", "key"):
         if k in cl:
             return cl[k]
-    # fallback: se houver só uma coluna inteira, usa
     ints = [c for c in df.columns if pd.api.types.is_integer_dtype(df[c])]
     if len(ints) == 1:
         return ints[0]
@@ -108,7 +94,6 @@ def detect_key_col(df: pd.DataFrame, key: str) -> Optional[str]:
 
 @st.cache_data(show_spinner=False)
 def load_fact(data_root: Path) -> pd.DataFrame:
-    # prioriza versão FR (já denormalizada)
     for name in ("fact_vive_le_marche_fr.parquet", "fact_vive_le_marche.parquet"):
         p = data_root / name
         if p.exists():
@@ -120,15 +105,12 @@ def load_fact(data_root: Path) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_dimension(dims_root: Path, key: str) -> Optional[pd.DataFrame]:
-    # busca por nomes mais comuns
     names = DIM_FILENAMES.get(key, [])
     paths = []
     for base in names:
         paths += [dims_root / f"{base}.parquet", dims_root / f"{base}.csv"]
-    # varre diretório como fallback
     paths += list(dims_root.glob(f"*{key}*.parquet"))
     paths += list(dims_root.glob(f"*{key}*.csv"))
-
     for p in paths:
         if not p.exists(): 
             continue
@@ -140,19 +122,20 @@ def load_dimension(dims_root: Path, key: str) -> Optional[pd.DataFrame]:
         if not kcol or not dcol:
             continue
         out = df[[kcol, dcol]].drop_duplicates()
-        out.columns = [key, DESC_OUT[key]]
+        out.columns = [key, DESC_OUT.get(key, f"{key.lower()}_desc_fr")]
         out[key] = out[key].astype(str).str.strip()
         return out
     return None
 
 def enrich_with_dims(df: pd.DataFrame, dims_root: Path) -> pd.DataFrame:
     out = df.copy()
-    # força chaves do fato para string
-    for k in DIM_TARGETS:
+    # normaliza chaves
+    for k in list(DESC_OUT.keys()):
         if k in out.columns:
             out[k] = out[k].astype(str).str.strip()
 
-    for k in DIM_TARGETS:
+    # une dimensões necessárias para filtros/visualizações
+    for k in set(FILTER_KEYS + ["REGLT", "ZELT", "SEXE", "ANAI"]):
         if k not in out.columns:
             continue
         dim = load_dimension(dims_root, k)
@@ -175,15 +158,12 @@ def find_geojson(data_root: Path, key: str) -> Optional[Path]:
         p = geo / name
         if p.exists():
             return p
-    # fallback: primeiro .geojson que contenha o nome
     for p in geo.glob("*.geojson"):
         if key.lower() in p.stem.lower():
             return p
     return None
 
-# ============================================
-# Args via linha de comando (streamlit run ... -- --data_root X)
-# ============================================
+# ------------- Args & Load -------------
 def build_parser():
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--data_root", type=str, default=str(Path.cwd() / "data"))
@@ -200,30 +180,25 @@ args = get_args()
 DATA_ROOT = Path(args.data_root).resolve()
 DIMS_ROOT = find_dims_root(DATA_ROOT)
 
+# ------------- Sidebar (filtros) -------------
 st.sidebar.title("⚙️ Configuração")
 st.sidebar.write(f"**Data root:** `{DATA_ROOT}`")
 st.sidebar.write(f"**Dims root:** `{DIMS_ROOT}`")
 
-# ============================================
-# Load & Enrich
-# ============================================
 fact_raw = load_fact(DATA_ROOT)
 with st.spinner("Fazendo merge das dimensões (FR)…"):
     fact = enrich_with_dims(fact_raw, DIMS_ROOT)
 st.success("Dados prontos!")
 
-# ============================================
-# Filtros
-# ============================================
+# Filtros compartilhados
 st.sidebar.subheader("Filtros")
 filters: Dict[str, list] = {}
-
 if "Ano" in fact.columns:
     anos = sorted(fact["Ano"].dropna().unique().tolist())
     sel_anos = st.sidebar.multiselect("Ano", anos, default=anos)
     filters["Ano"] = sel_anos
 
-for k in ["GS","NA10","NA5","REGLT","ZELT","SEXE","ANAI"]:
+for k in ["GS","NA10","NA5"]:
     dcol = DESC_OUT.get(k)
     if k in fact.columns and dcol in fact.columns:
         vals = fact[[k, dcol]].drop_duplicates().sort_values(dcol)
@@ -234,95 +209,269 @@ for k in ["GS","NA10","NA5","REGLT","ZELT","SEXE","ANAI"]:
             codes = vals.loc[vals[dcol].isin(sel), k].astype(str).tolist()
             filters[k] = codes
 
-df_view = fact.copy()
-for col, vals in filters.items():
-    if vals:
-        df_view = df_view[df_view[col].astype(str).isin([str(v) for v in vals])]
+def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col, vals in filters.items():
+        if vals:
+            out = out[out[col].astype(str).isin([str(v) for v in vals])]
+    return out
 
-# ============================================
-# KPIs
-# ============================================
-st.title("Vive le Marché — Dashboard")
-c1, c2, c3 = st.columns(3)
-total = int(df_view[METRIC].sum()) if METRIC in df_view.columns else len(df_view)
-n_regs = df_view["REGLT"].nunique() if "REGLT" in df_view.columns else 0
-n_zelt = df_view["ZELT"].nunique() if "ZELT" in df_view.columns else 0
-c1.metric("Total (QTD)", f"{total:,}".replace(",", "."))
-c2.metric("Regiões (REGLT) filtradas", n_regs)
-c3.metric("Zonas de emprego (ZELT) filtradas", n_zelt)
+df_view = apply_filters(fact)
 
-# ============================================
-# Tabela com labels FR
-# ============================================
-st.subheader("Tabela (labels em francês)")
-show_cols = [c for c in [
-    "Ano","gs_desc_fr","na10_desc_fr","na5_desc_fr",
-    "reglt_desc_fr","zelt_desc_fr","sexe_desc_fr","anai_desc_fr",METRIC
-] if c in df_view.columns]
-if not show_cols:
-    show_cols = df_view.columns.tolist()[:10]
-st.dataframe(df_view[show_cols].head(500))
+# ---------------- Tabs ----------------
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["1 · Adhoc", "2 · Tableau de bord", "3 · Tableau", "4 · Cartes", "5 · Aperçu"])
 
-# Pivot por Ano x Dimensão
-st.subheader("Pivot por Ano × Dimensão")
-dim_choice = st.selectbox("Dimensão", [d for d in ["GS","NA10","NA5","REGLT","ZELT","SEXE","ANAI"] if d in df_view.columns], index=0)
-dcol = DESC_OUT.get(dim_choice)
-if dcol and dcol in df_view.columns and METRIC in df_view.columns:
-    piv = (df_view.groupby(["Ano", dcol], dropna=False)[METRIC]
-           .sum().reset_index().pivot(index=dcol, columns="Ano", values=METRIC)
-           .fillna(0).astype(int))
-    st.dataframe(piv)
+# -------- Tab 1: Adhoc --------
+with tab1:
+    st.header("Adhoc")
+    c1, c2, c3 = st.columns(3)
+    total = int(df_view[METRIC].sum()) if METRIC in df_view.columns else len(df_view)
+    n_gs = df_view["GS"].nunique() if "GS" in df_view.columns else 0
+    n_na10 = df_view["NA10"].nunique() if "NA10" in df_view.columns else 0
+    c1.metric("Total (QTD)", f"{total:,}".replace(",", "."))
+    c2.metric("Segmentos (GS) filtrados", n_gs)
+    c3.metric("NA10 filtrados", n_na10)
 
-# ============================================
-# Mapas (GeoJSON local)
-# ============================================
-def plot_geo(df: pd.DataFrame, key: str, value_col: str) -> None:
+    st.subheader("Tabela (labels em francês)")
+    show_cols = [c for c in ["Ano","gs_desc_fr","na10_desc_fr","na5_desc_fr", METRIC] if c in df_view.columns]
+    if not show_cols:
+        show_cols = df_view.columns.tolist()[:10]
+    st.dataframe(df_view[show_cols].head(1000))
+
+    st.subheader("Pivot por Ano × Dimensão")
+    dim_choice = st.selectbox("Dimensão", [d for d in ["GS","NA10","NA5"] if d in df_view.columns], index=0, key="adhoc_dim")
+    dcol = DESC_OUT.get(dim_choice)
+    if dcol and dcol in df_view.columns and METRIC in df_view.columns:
+        piv = (df_view.groupby(["Ano", dcol], dropna=False)[METRIC]
+               .sum().reset_index().pivot(index=dcol, columns="Ano", values=METRIC)
+               .fillna(0).astype(int))
+        st.dataframe(piv)
+
+# -------- Tab 2: Tableau de bord --------
+with tab2:
+    st.header("Tableau de bord")
+    # KPIs: Total, YoY, #GS, #NA10
+    k1, k2, k3, k4 = st.columns(4)
+    total = int(df_view[METRIC].sum()) if METRIC in df_view.columns else 0
+    # YoY: compara último ano do filtro com o anterior dentro do recorte
+    yoy_txt = "—"
+    if "Ano" in df_view.columns and METRIC in df_view.columns:
+        anos_sorted = sorted(pd.to_numeric(df_view["Ano"], errors="coerce").dropna().astype(int).unique().tolist())
+        if len(anos_sorted) >= 2:
+            last, prev = anos_sorted[-1], anos_sorted[-2]
+            v_last = df_view.loc[pd.to_numeric(df_view["Ano"], errors="coerce").astype("Int64")==last, METRIC].sum()
+            v_prev = df_view.loc[pd.to_numeric(df_view["Ano"], errors="coerce").astype("Int64")==prev, METRIC].sum()
+            if v_prev != 0:
+                yoy = (v_last - v_prev) / v_prev * 100
+                yoy_txt = f"{yoy:+.1f}%"
+            else:
+                yoy_txt = "N/A"
+    top_gs = "—"
+    if "gs_desc_fr" in df_view.columns and METRIC in df_view.columns:
+        s = df_view.groupby("gs_desc_fr")[METRIC].sum().sort_values(ascending=False)
+        if len(s) > 0:
+            top_gs = s.index[0]
+    top_na10 = "—"
+    if "na10_desc_fr" in df_view.columns and METRIC in df_view.columns:
+        s = df_view.groupby("na10_desc_fr")[METRIC].sum().sort_values(ascending=False)
+        if len(s) > 0:
+            top_na10 = s.index[0]
+
+    k1.metric("Total (QTD)", f"{total:,}".replace(",", "."))
+    k2.metric("Δ YoY", yoy_txt)
+    k3.metric("Top GS", top_gs)
+    k4.metric("Top NA10", top_na10)
+
+    # Charts grid
+    r1c1, r1c2 = st.columns(2)
+    if PLOTLY_OK and METRIC in df_view.columns:
+        # Série temporal por Ano
+        with r1c1:
+            st.subheader("Série temporal (Ano)")
+            ser = df_view.groupby("Ano", dropna=False)[METRIC].sum().reset_index()
+            fig = px.line(ser, x="Ano", y=METRIC, markers=True)
+            st.plotly_chart(fig, use_container_width=True)
+        # Top 10 NA10
+        with r1c2:
+            st.subheader("Top 10 — NA10")
+            if "na10_desc_fr" in df_view.columns:
+                top = (df_view.groupby("na10_desc_fr")[METRIC].sum()
+                       .sort_values(ascending=False).head(10).reset_index())
+                fig = px.bar(top, x=METRIC, y="na10_desc_fr", orientation="h")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Sem rótulos FR para NA10.")
+
+        r2c1, r2c2 = st.columns(2)
+        # Breakdown GS por Ano (stacked)
+        with r2c1:
+            st.subheader("GS por Ano (stacked)")
+            if "gs_desc_fr" in df_view.columns and "Ano" in df_view.columns:
+                g = (df_view.groupby(["Ano","gs_desc_fr"])[METRIC].sum().reset_index())
+                fig = px.bar(g, x="Ano", y=METRIC, color="gs_desc_fr")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Sem rótulos FR para GS.")
+
+        # Treemap NA5
+        with r2c2:
+            st.subheader("NA5 (treemap)")
+            if "na5_desc_fr" in df_view.columns:
+                g = (df_view.groupby("na5_desc_fr")[METRIC].sum().reset_index())
+                fig = px.treemap(g, path=["na5_desc_fr"], values=METRIC)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Sem rótulos FR para NA5.")
+
+# -------- Tab 3: Tableau --------
+with tab3:
+    st.header("Tableau")
+    q = st.text_input("🔎 Filtrar por texto (qualquer coluna visível):", "")
+    base_cols = ["Ano","gs_desc_fr","na10_desc_fr","na5_desc_fr", METRIC]
+    cols = [c for c in base_cols if c in df_view.columns]
+    data = df_view[cols].copy()
+    if q:
+        ql = q.lower()
+        data = data[data.apply(lambda r: ql in (" ".join(map(str, r.values))).lower(), axis=1)]
+    st.dataframe(data.head(2000))
+    st.download_button("Baixar CSV (recorte)", data=data.to_csv(index=False, sep=";").encode("utf-8-sig"),
+                       file_name="tableau.csv", mime="text/csv")
+
+# -------- Tab 4: Cartes --------
+
+with tab4:
+    st.header("Cartes")
     if not PLOTLY_OK:
         st.info("Plotly não disponível neste ambiente.")
-        return
-    geo_p = find_geojson(DATA_ROOT, key)
-    if geo_p is None:
-        st.info(f"GeoJSON para {key} não encontrado. Coloque um arquivo em {DATA_ROOT/'geo'} com um destes nomes: {', '.join(GEO_FILES.get(key, []))}.")
-        return
-    import json
-    gj = json.loads(geo_p.read_text(encoding="utf-8"))
-    # agrega por código
-    df_agg = df.groupby(key, dropna=False)[value_col].sum().reset_index()
-    df_agg[key] = df_agg[key].astype(str)
-    # detecta propriedade de código no GeoJSON
-    feature_key = None
-    if "features" in gj and gj["features"]:
-        props = gj["features"][0].get("properties", {})
-        for pk in ["code","CODE","INSEE_REG","REG","ZE2020","ZE2024",key,key.lower()]:
-            if pk in props:
-                feature_key = pk
-                break
-    if not feature_key:
-        st.warning(f"Não foi possível detectar a coluna de código no GeoJSON {geo_p.name}.")
-        return
-    fig = px.choropleth(
-        df_agg, geojson=gj, locations=key, featureidkey=f"properties.{feature_key}",
-        color=value_col, color_continuous_scale="Blues",
-        labels={value_col: METRIC}, title=f"Mapa — {key}"
-    )
-    fig.update_geos(fitbounds="locations", visible=False)
-    st.plotly_chart(fig, use_container_width=True)
+    else:
+        def _detect_feature_key(gj, key_hint: str):
+            if "features" in gj and gj["features"]:
+                props = gj["features"][0].get("properties", {})
+                for pk in ["code","CODE","INSEE_REG","REG","ZE2020","ZE2024", key_hint, key_hint.lower()]:
+                    if pk in props:
+                        return pk
+            return None
 
-st.subheader("Mapas")
-colA, colB = st.columns(2)
-with colA:
-    if "REGLT" in df_view.columns and METRIC in df_view.columns:
-        plot_geo(df_view, "REGLT", METRIC)
-with colB:
-    if "ZELT" in df_view.columns and METRIC in df_view.columns:
-        plot_geo(df_view, "ZELT", METRIC)
+        def _centroids_from_geojson(gj, feature_key: str):
+            # Retorna dict: {feature_code: (lon, lat)}
+            import math
+            cent = {}
+            feats = gj.get("features", [])
+            for f in feats:
+                props = f.get("properties", {})
+                if feature_key not in props:
+                    continue
+                code_val = str(props[feature_key])
+                geom = f.get("geometry", {}) or {}
+                gtype = geom.get("type", "")
+                coords = geom.get("coordinates", [])
+                xs, ys = [], []
+                if gtype == "Polygon":
+                    # coords: [ [ [x,y], [x,y], ... ] , holes... ]
+                    if len(coords) > 0:
+                        ring = coords[0]
+                        for x,y in ring:
+                            xs.append(float(x)); ys.append(float(y))
+                elif gtype == "MultiPolygon":
+                    for poly in coords:
+                        if len(poly) > 0:
+                            ring = poly[0]
+                            for x,y in ring:
+                                xs.append(float(x)); ys.append(float(y))
+                # centroid simples (média dos vértices)
+                if xs and ys:
+                    cx = sum(xs)/len(xs)
+                    cy = sum(ys)/len(ys)
+                    cent[code_val] = (cx, cy)
+            return cent
 
-# ============================================
-# Export
-# ============================================
-st.subheader("Exportar recorte atual")
-def to_csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False, sep=";").encode("utf-8-sig")
-st.download_button("Baixar CSV (recorte)", data=to_csv_bytes(df_view[show_cols]), file_name="vive_le_marche_recorte.csv", mime="text/csv")
+        def plot_choropleth(df: pd.DataFrame, key: str, value_col: str) -> None:
+            import json
+            geo_p = find_geojson(DATA_ROOT, key)
+            if geo_p is None:
+                st.info(f"GeoJSON para {key} não encontrado. Coloque um arquivo em {DATA_ROOT/'geo'}.")
+                return
+            gj = json.loads(geo_p.read_text(encoding='utf-8'))
+            df_agg = df.groupby(key, dropna=False)[value_col].sum().reset_index()
+            df_agg[key] = df_agg[key].astype(str)
+            feature_key = _detect_feature_key(gj, key)
+            if not feature_key:
+                st.warning(f"Não foi possível detectar a coluna de código no GeoJSON {geo_p.name}.")
+                return
+            fig = px.choropleth(
+                df_agg, geojson=gj, locations=key, featureidkey=f"properties.{feature_key}",
+                color=value_col, color_continuous_scale="Blues",
+                labels={value_col: METRIC}, title=f"Mapa — {key} (choropleth)"
+            )
+            fig.update_geos(fitbounds="locations", visible=False)
+            st.plotly_chart(fig, use_container_width=True)
 
-st.caption("💡 Coloque GeoJSONs em data/geo. O app reconhece automaticamente campos comuns de código (INSEE_REG/REG/ZE2020…).")
+        def plot_bubble_zelt(df: pd.DataFrame, value_col: str) -> None:
+            import json
+            geo_p = find_geojson(DATA_ROOT, "ZELT")
+            if geo_p is None:
+                st.info(f"GeoJSON para ZELT não encontrado. Coloque um arquivo em {DATA_ROOT/'geo'}.")
+                return
+            gj = json.loads(geo_p.read_text(encoding='utf-8'))
+            feature_key = _detect_feature_key(gj, "ZELT")
+            if not feature_key:
+                st.warning(f"Não foi possível detectar a coluna de código no GeoJSON {geo_p.name}.")
+                return
+            # agregação por ZELT
+            df_agg = df.groupby("ZELT", dropna=False)[value_col].sum().reset_index()
+            df_agg["ZELT"] = df_agg["ZELT"].astype(str)
+            # centroids
+            cent = _centroids_from_geojson(gj, feature_key)
+            df_agg["lon"] = df_agg["ZELT"].map(lambda k: cent.get(str(k), (None, None))[0])
+            df_agg["lat"] = df_agg["ZELT"].map(lambda k: cent.get(str(k), (None, None))[1])
+            df_agg = df_agg.dropna(subset=["lon","lat"])
+            # label opcional
+            label_col = "zelt_desc_fr" if "zelt_desc_fr" in df.columns else "ZELT"
+            df_agg[label_col] = df_agg["ZELT"].map(
+                df.drop_duplicates("ZELT").set_index("ZELT")[label_col].to_dict()
+            ) if label_col in df.columns else df_agg["ZELT"]
+            # scatter_geo (bolhas)
+            fig = px.scatter_geo(
+                df_agg,
+                lon="lon", lat="lat",
+                size=value_col, hover_name=label_col,
+                projection="mercator",
+                color=value_col,
+                size_max=40,
+                title="ZELT — Bolhas por QTD",
+            )
+            fig.update_geos(fitbounds="locations", visible=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+        cA, cB = st.columns(2)
+        with cA:
+            # Choropleth REGLT (como referência)
+            if "REGLT" in df_view.columns and METRIC in df_view.columns:
+                plot_choropleth(df_view, "REGLT", METRIC)
+        with cB:
+            # Choropleth ZELT
+            if "ZELT" in df_view.columns and METRIC in df_view.columns:
+                plot_choropleth(df_view, "ZELT", METRIC)
+
+        st.subheader("Bolhas — ZELT (QTD)")
+        plot_bubble_zelt(df_view, METRIC)
+with tab5:
+    st.header("Aperçu")
+    st.markdown('''
+**Vive le Marché** — painel exploratório com dados normalizados e dimensões com rótulos em francês.
+
+**Filtros ativos:** Ano, GS, NA5, NA10.  
+**Métrica padrão:** `QTD` (soma).
+
+**Pastas esperadas**
+- `data/fact_vive_le_marche_fr.parquet` *(ou `fact_vive_le_marche.parquet`)*
+- `data/dimensions` **ou** `data/dimension` **ou** `data/dimensions_parquet`
+- `data/geo` *(opcional; GeoJSONs para REGLT/ZELT)*
+
+Se precisar de novos gráficos ou KPIs, peça na conversa 😉
+''')
+    # Pequeno sumário de linhas
+    st.write("Registros no recorte atual:", len(df_view))
+    if "Ano" in df_view.columns:
+        anos_list = ", ".join(map(str, sorted(pd.to_numeric(df_view['Ano'], errors='coerce').dropna().unique().astype(int))))
+        st.write("Anos presentes:", anos_list)
