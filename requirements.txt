@@ -1,6 +1,6 @@
 # requirements.txt para o dashboard Vive le Marché
 streamlit==1.48.1
-pandas>=2.2
+pandas>=2.2.2
 numpy<2
 pyarrow>=14
 fastparquet
