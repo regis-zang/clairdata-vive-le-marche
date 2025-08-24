@@ -1,8 +1,9 @@
 
 # app_vive_le_marche.py — multi-onglets (Adhoc, Tableau de bord, Tableau, Cartes, Aperçu)
+# Mapas (aba Cartes) temporariamente desativados — manteremos apenas o placeholder.
 from __future__ import annotations
 from pathlib import Path
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict
 import argparse
 
 import pandas as pd
@@ -38,10 +39,6 @@ DIM_FILENAMES = {
     "REGLT": ["dim_reglt", "Dim_REGLT"],
     "SEXE":  ["dim_sexe", "Dim_SEXE"],
     "ANAI":  ["dim_anai", "Dim_ANAI"],
-}
-GEO_FILES = {
-    "REGLT": ["fr_regions.geojson", "regions.geojson", "reglt.geojson"],
-    "ZELT":  ["fr_zones_emploi.geojson", "zelt.geojson", "zones_emploi.geojson"],
 }
 
 # --------------- IO helpers ---------------
@@ -149,19 +146,6 @@ def enrich_with_dims(df: pd.DataFrame, dims_root: Path) -> pd.DataFrame:
         if before != after:
             st.warning(f"Dimensão '{k}' alterou número de linhas ({before} → {after}). Verifique duplicidades na dimensão.")
     return out
-
-def find_geojson(data_root: Path, key: str) -> Optional[Path]:
-    geo = data_root / "geo"
-    if not geo.exists():
-        return None
-    for name in GEO_FILES.get(key, []):
-        p = geo / name
-        if p.exists():
-            return p
-    for p in geo.glob("*.geojson"):
-        if key.lower() in p.stem.lower():
-            return p
-    return None
 
 # ------------- Args & Load -------------
 def build_parser():
@@ -337,124 +321,13 @@ with tab3:
     st.download_button("Baixar CSV (recorte)", data=data.to_csv(index=False, sep=";").encode("utf-8-sig"),
                        file_name="tableau.csv", mime="text/csv")
 
-# -------- Tab 4: Cartes --------
-
+# -------- Tab 4: Cartes (placeholder) --------
 with tab4:
     st.header("Cartes")
-    if not PLOTLY_OK:
-        st.info("Plotly não disponível neste ambiente.")
-    else:
-        def _detect_feature_key(gj, key_hint: str):
-            if "features" in gj and gj["features"]:
-                props = gj["features"][0].get("properties", {})
-                for pk in ["code","CODE","INSEE_REG","REG","ZE2020","ZE2024", key_hint, key_hint.lower()]:
-                    if pk in props:
-                        return pk
-            return None
+    st.info("🗺️ Os mapas foram temporariamente desativados. A aba permanece para configurarmos amanhã.")
+    st.caption("Dica: deixe prontos os arquivos em data/geo (GeoJSON) ou um CSV de centróides; amanhã plugamos aqui.")
 
-        def _centroids_from_geojson(gj, feature_key: str):
-            # Retorna dict: {feature_code: (lon, lat)}
-            import math
-            cent = {}
-            feats = gj.get("features", [])
-            for f in feats:
-                props = f.get("properties", {})
-                if feature_key not in props:
-                    continue
-                code_val = str(props[feature_key])
-                geom = f.get("geometry", {}) or {}
-                gtype = geom.get("type", "")
-                coords = geom.get("coordinates", [])
-                xs, ys = [], []
-                if gtype == "Polygon":
-                    # coords: [ [ [x,y], [x,y], ... ] , holes... ]
-                    if len(coords) > 0:
-                        ring = coords[0]
-                        for x,y in ring:
-                            xs.append(float(x)); ys.append(float(y))
-                elif gtype == "MultiPolygon":
-                    for poly in coords:
-                        if len(poly) > 0:
-                            ring = poly[0]
-                            for x,y in ring:
-                                xs.append(float(x)); ys.append(float(y))
-                # centroid simples (média dos vértices)
-                if xs and ys:
-                    cx = sum(xs)/len(xs)
-                    cy = sum(ys)/len(ys)
-                    cent[code_val] = (cx, cy)
-            return cent
-
-        def plot_choropleth(df: pd.DataFrame, key: str, value_col: str) -> None:
-            import json
-            geo_p = find_geojson(DATA_ROOT, key)
-            if geo_p is None:
-                st.info(f"GeoJSON para {key} não encontrado. Coloque um arquivo em {DATA_ROOT/'geo'}.")
-                return
-            gj = json.loads(geo_p.read_text(encoding='utf-8'))
-            df_agg = df.groupby(key, dropna=False)[value_col].sum().reset_index()
-            df_agg[key] = df_agg[key].astype(str)
-            feature_key = _detect_feature_key(gj, key)
-            if not feature_key:
-                st.warning(f"Não foi possível detectar a coluna de código no GeoJSON {geo_p.name}.")
-                return
-            fig = px.choropleth(
-                df_agg, geojson=gj, locations=key, featureidkey=f"properties.{feature_key}",
-                color=value_col, color_continuous_scale="Blues",
-                labels={value_col: METRIC}, title=f"Mapa — {key} (choropleth)"
-            )
-            fig.update_geos(fitbounds="locations", visible=False)
-            st.plotly_chart(fig, use_container_width=True)
-
-        def plot_bubble_zelt(df: pd.DataFrame, value_col: str) -> None:
-            import json
-            geo_p = find_geojson(DATA_ROOT, "ZELT")
-            if geo_p is None:
-                st.info(f"GeoJSON para ZELT não encontrado. Coloque um arquivo em {DATA_ROOT/'geo'}.")
-                return
-            gj = json.loads(geo_p.read_text(encoding='utf-8'))
-            feature_key = _detect_feature_key(gj, "ZELT")
-            if not feature_key:
-                st.warning(f"Não foi possível detectar a coluna de código no GeoJSON {geo_p.name}.")
-                return
-            # agregação por ZELT
-            df_agg = df.groupby("ZELT", dropna=False)[value_col].sum().reset_index()
-            df_agg["ZELT"] = df_agg["ZELT"].astype(str)
-            # centroids
-            cent = _centroids_from_geojson(gj, feature_key)
-            df_agg["lon"] = df_agg["ZELT"].map(lambda k: cent.get(str(k), (None, None))[0])
-            df_agg["lat"] = df_agg["ZELT"].map(lambda k: cent.get(str(k), (None, None))[1])
-            df_agg = df_agg.dropna(subset=["lon","lat"])
-            # label opcional
-            label_col = "zelt_desc_fr" if "zelt_desc_fr" in df.columns else "ZELT"
-            df_agg[label_col] = df_agg["ZELT"].map(
-                df.drop_duplicates("ZELT").set_index("ZELT")[label_col].to_dict()
-            ) if label_col in df.columns else df_agg["ZELT"]
-            # scatter_geo (bolhas)
-            fig = px.scatter_geo(
-                df_agg,
-                lon="lon", lat="lat",
-                size=value_col, hover_name=label_col,
-                projection="mercator",
-                color=value_col,
-                size_max=40,
-                title="ZELT — Bolhas por QTD",
-            )
-            fig.update_geos(fitbounds="locations", visible=False)
-            st.plotly_chart(fig, use_container_width=True)
-
-        cA, cB = st.columns(2)
-        with cA:
-            # Choropleth REGLT (como referência)
-            if "REGLT" in df_view.columns and METRIC in df_view.columns:
-                plot_choropleth(df_view, "REGLT", METRIC)
-        with cB:
-            # Choropleth ZELT
-            if "ZELT" in df_view.columns and METRIC in df_view.columns:
-                plot_choropleth(df_view, "ZELT", METRIC)
-
-        st.subheader("Bolhas — ZELT (QTD)")
-        plot_bubble_zelt(df_view, METRIC)
+# -------- Tab 5: Aperçu --------
 with tab5:
     st.header("Aperçu")
     st.markdown('''
@@ -466,7 +339,7 @@ with tab5:
 **Pastas esperadas**
 - `data/fact_vive_le_marche_fr.parquet` *(ou `fact_vive_le_marche.parquet`)*
 - `data/dimensions` **ou** `data/dimension` **ou** `data/dimensions_parquet`
-- `data/geo` *(opcional; GeoJSONs para REGLT/ZELT)*
+- `data/geo` *(opcional; GeoJSONs futuros para REGLT/ZELT)*
 
 Se precisar de novos gráficos ou KPIs, peça na conversa 😉
 ''')
